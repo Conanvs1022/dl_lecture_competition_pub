@@ -5,16 +5,18 @@ class build_resnet_block(nn.Module):
     """
     a resnet block which includes two general_conv2d
     """
-    def __init__(self, channels, layers=2, do_batch_norm=False):
+    def __init__(self, channels, layers=2, do_batch_norm=False, dropout_rate=0.3):
         super(build_resnet_block,self).__init__()
         self._channels = channels
         self._layers = layers
+        self._dropout_rate = dropout_rate
 
-        self.res_block = nn.Sequential(*[general_conv2d(in_channels=self._channels,
-                                             out_channels=self._channels,
-                                             strides=1,
-                                             do_batch_norm=do_batch_norm) for i in range(self._layers)])
-
+        self.res_block = nn.Sequential(*[
+            nn.Sequential(
+                general_conv2d(in_channels=self._channels, out_channels=self._channels, strides=1, do_batch_norm=do_batch_norm),
+                nn.Dropout(p=self._dropout_rate)
+            ) for i in range(self._layers)
+        ])
     def forward(self,input_res):
         inputs = input_res.clone()
         input_res = self.res_block(input_res)
@@ -24,7 +26,7 @@ class upsample_conv2d_and_predict_flow(nn.Module):
     """
     an upsample convolution layer which includes a nearest interpolate and a general_conv2d
     """
-    def __init__(self, in_channels, out_channels, ksize=3, do_batch_norm=False):
+    def __init__(self, in_channels, out_channels, ksize=3, do_batch_norm=False, dropout_prob=0.5):
         super(upsample_conv2d_and_predict_flow, self).__init__()
         self._in_channels = in_channels
         self._out_channels = out_channels
@@ -47,18 +49,20 @@ class upsample_conv2d_and_predict_flow(nn.Module):
                                            strides=1,
                                            padding=0,
                                            activation='tanh')
+        self.dropout = nn.Dropout(p=dropout_prob)
 
     def forward(self, conv):
         shape = conv.shape
         conv = nn.functional.interpolate(conv,size=[shape[2]*2,shape[3]*2],mode='nearest')
         conv = self.pad(conv)
         conv = self.general_conv2d(conv)
+        conv = self.dropout(conv)
 
         flow = self.predict_flow(conv) * 256.
         
         return torch.cat([conv,flow.clone()], dim=1), flow
 
-def general_conv2d(in_channels,out_channels, ksize=3, strides=2, padding=1, do_batch_norm=False, activation='relu'):
+def general_conv2d(in_channels,out_channels, ksize=3, strides=2, padding=1, do_batch_norm=False, activation='relu', dropout_prob=0.3):
     """
     a general convolution layer which includes a conv2d, a relu and a batch_normalize
     """
@@ -68,13 +72,16 @@ def general_conv2d(in_channels,out_channels, ksize=3, strides=2, padding=1, do_b
                 nn.Conv2d(in_channels = in_channels,out_channels = out_channels,kernel_size = ksize,
                         stride=strides,padding=padding),
                 nn.ReLU(inplace=True),
+                nn.Dropout(p=dropout_prob),  # Add Dropout here with a probability of 0.5
                 nn.BatchNorm2d(out_channels,eps=1e-5,momentum=0.99)
+                
             )
         else:
             conv2d = nn.Sequential(
                 nn.Conv2d(in_channels = in_channels,out_channels = out_channels,kernel_size = ksize,
                         stride=strides,padding=padding),
-                nn.ReLU(inplace=True)
+                nn.ReLU(inplace=True),
+                nn.Dropout(p=dropout_prob)  # Add Dropout here with a probability of 0.5
             )
     elif activation == 'tanh':
         if do_batch_norm:
@@ -82,12 +89,14 @@ def general_conv2d(in_channels,out_channels, ksize=3, strides=2, padding=1, do_b
                 nn.Conv2d(in_channels = in_channels,out_channels = out_channels,kernel_size = ksize,
                         stride=strides,padding=padding),
                 nn.Tanh(),
+                nn.Dropout(p=dropout_prob),  # Add Dropout here with a probability of 0.5
                 nn.BatchNorm2d(out_channels,eps=1e-5,momentum=0.99)
             )
         else:
             conv2d = nn.Sequential(
                 nn.Conv2d(in_channels = in_channels,out_channels = out_channels,kernel_size = ksize,
                         stride=strides,padding=padding),
-                nn.Tanh()
+                nn.Tanh(),
+                nn.Dropout(p=dropout_prob)  # Add Dropout here with a probability of 0.5
             )
     return conv2d
