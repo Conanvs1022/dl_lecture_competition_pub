@@ -1,4 +1,3 @@
-ストレージの 98% を使用しています … 空き容量がなくなると、ファイルの作成、編集、アップロードができなくなります。100 GB の保存容量を 1 か月間、￥250 ￥65 でご利用いただけます。
 import math
 from pathlib import Path, PurePath
 from typing import Dict, Tuple
