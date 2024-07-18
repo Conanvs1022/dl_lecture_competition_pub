@@ -4,7 +4,7 @@ from omegaconf import DictConfig
 from torch.utils.data import DataLoader
 import random
 import numpy as np
-from src.models.evflownet import EVFlowNet
+from src.models.evflownet_0618 import EVFlowNet
 from src.datasets import DatasetProvider
 from enum import Enum, auto
 from src.datasets import train_collate
@@ -24,15 +24,29 @@ def set_seed(seed):
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
     torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
+    torch.backends.cudnn.enabled = True
+    torch.backends.cudnn.benchmark = True
     np.random.seed(seed)
 
 def compute_epe_error(pred_flow: torch.Tensor, gt_flow: torch.Tensor):
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     '''
     end-point-error (ground truthと予測値の二乗誤差)を計算
     pred_flow: torch.Tensor, Shape: torch.Size([B, 2, 480, 640]) => 予測したオプティカルフローデータ
     gt_flow: torch.Tensor, Shape: torch.Size([B, 2, 480, 640]) => 正解のオプティカルフローデータ
     '''
+    print(pred_flow.shape)
+    print(gt_flow.shape)
+
+    # if pred_flow.shape[1] != gt_flow.shape[1]:
+    #     conv = torch.nn.Conv2d(pred_flow.shape[1], gt_flow.shape[1], kernel_size=1).to(device)  # GPUに移動
+    #     pred_flow = conv(pred_flow)
+
+        # gt_flowのチャンネル数をpred_flowに合わせるために1x1の畳み込みを使用
+    if gt_flow.shape[1] != pred_flow.shape[1]:
+        conv = torch.nn.Conv2d(gt_flow.shape[1], pred_flow.shape[1], kernel_size=1).to(device)  # GPUに移動
+        gt_flow = conv(gt_flow)
+
     epe = torch.mean(torch.mean(torch.norm(pred_flow - gt_flow, p=2, dim=1), dim=(1, 2)), dim=0)
     return epe
 
@@ -46,6 +60,7 @@ def save_optical_flow_to_npy(flow: torch.Tensor, file_name: str):
 
 @hydra.main(version_base=None, config_path="configs", config_name="base")
 def main(args: DictConfig):
+    global device
     set_seed(args.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     '''
@@ -127,8 +142,12 @@ def main(args: DictConfig):
             batch: Dict[str, Any]
             event_image = batch["event_volume"].to(device) # [B, 4, 480, 640]
             ground_truth_flow = batch["flow_gt"].to(device) # [B, 2, 480, 640]
-            flow = model(event_image) # [B, 2, 480, 640]
-            loss: torch.Tensor = compute_epe_error(flow, ground_truth_flow)
+            skip_connections, flow_dict = model(event_image) # [B, 2, 480, 640]
+            loss: torch.Tensor = compute_epe_error(flow_dict['flow3'], ground_truth_flow) + compute_epe_error(flow_dict['flow2'], skip_connections['skip0']) + compute_epe_error(flow_dict['flow1'], skip_connections['skip1'])  # + compute_epe_error(flow_dict['flow0'], skip_connections['skip2'])
+            print(f"compute_epe_error(flow_dict['flow3'], ground_truth_flow) : {compute_epe_error(flow_dict['flow3'], ground_truth_flow)}")
+            print(f"compute_epe_error(flow_dict['flow2'], skip_connections['skip0']) : {compute_epe_error(flow_dict['flow2'], skip_connections['skip0'])}")
+            print(f"compute_epe_error(flow_dict['flow1'], skip_connections['skip1']) : {compute_epe_error(flow_dict['flow1'], skip_connections['skip1'])}")
+            # print(f"compute_epe_error(flow_dict['flow0'], skip_connections['skip2']) : {compute_epe_error(flow_dict['flow0'], skip_connections['skip2'])}")
             print(f"batch {i} loss: {loss.item()}")
             optimizer.zero_grad()
             loss.backward()
@@ -137,34 +156,34 @@ def main(args: DictConfig):
             total_loss += loss.item()
         print(f'Epoch {epoch+1}, Loss: {total_loss / len(train_data)}')
 
-    # Create the directory if it doesn't exist
-    if not os.path.exists('checkpoints'):
-        os.makedirs('checkpoints')
-    
-    current_time = time.strftime("%Y%m%d%H%M%S")
-    model_path = f"checkpoints/model_{current_time}.pth"
-    torch.save(model.state_dict(), model_path)
-    print(f"Model saved to {model_path}")
+        # Create the directory if it doesn't exist
+        if not os.path.exists('checkpoints'):
+            os.makedirs('checkpoints')
+        
+        current_time = time.strftime("%Y%m%d%H%M%S")
+        model_path = f"checkpoints/model_{current_time}.pth"
+        torch.save(model.state_dict(), model_path)
+        print(f"Model saved to {model_path}")
 
-    # ------------------
-    #   Start predicting
-    # ------------------
-    model.load_state_dict(torch.load(model_path, map_location=device))
-    model.eval()
-    flow: torch.Tensor = torch.tensor([]).to(device)
-    with torch.no_grad():
-        print("start test")
-        for batch in tqdm(test_data):
-            batch: Dict[str, Any]
-            event_image = batch["event_volume"].to(device)
-            batch_flow = model(event_image) # [1, 2, 480, 640]
-            flow = torch.cat((flow, batch_flow), dim=0)  # [N, 2, 480, 640]
-        print("test done")
-    # ------------------
-    #  save submission
-    # ------------------
-    file_name = "submission"
-    save_optical_flow_to_npy(flow, file_name)
+        # ------------------
+        #   Start predicting
+        # ------------------
+        model.load_state_dict(torch.load(model_path, map_location=device))
+        model.eval()
+        flow: torch.Tensor = torch.tensor([]).to(device)
+        with torch.no_grad():
+            print("start test")
+            for batch in tqdm(test_data):
+                batch: Dict[str, Any]
+                event_image = batch["event_volume"].to(device)
+                skip_connections, flow_dict = model(event_image) # [1, 2, 480, 640]
+                flow = torch.cat((flow, flow_dict['flow3']), dim=0)  # [N, 2, 480, 640]
+            print("test done")
+        # ------------------
+        #  save submission
+        # ------------------
+        file_name = f"submit/{current_time}_{epoch}_submission"
+        save_optical_flow_to_npy(flow, file_name)
 
 if __name__ == "__main__":
     main()
