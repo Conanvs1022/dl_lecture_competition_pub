@@ -2,6 +2,7 @@ import torch
 from torch import nn
 from src.models.base import *
 from typing import Dict, Any
+import torch.nn.functional as F
 import gc
 
 _BASE_CHANNELS = 64
